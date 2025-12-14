@@ -14,10 +14,11 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Nazwa projektu dla Docker Compose (musi być unikalna per repozytorium)
+  # Nazwa kontenera tożsama z nazwą repo (dla czytelności w QNAP)
+  CONTAINER_NAME: ${{ github.event.repository.name }}
   COMPOSE_PROJECT_NAME: ${{ github.event.repository.name }}
-  # Port wewnętrzny aplikacji (na jakim nasłuchuje np. Node/Python wewnątrz kontenera)
-  INTERNAL_PORT: 3000
+  # ZMIANA: Chainlit działa na porcie 8000!
+  INTERNAL_PORT: 8000
 
 jobs:
   build:
@@ -51,32 +52,25 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        # To jest kluczowe dla Compose - musimy mieć plik docker-compose.yml na dysku QNAPa
 
       - name: Deploy with Compose
         run: |
           echo "🏁 Rozpoczynam deployment Docker Compose..."
 
-          # 1. Logowanie do rejestru na QNAP
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-          # 2. Definicja pełnej nazwy obrazu
-          FULL_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           
-          # Pobieramy najnowszy obraz (nawet jak nie było buildu, warto sprawdzić)
+          FULL_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           docker pull $FULL_IMAGE
 
           # ====================================================
-          # PORT HUNTER LOGIC (Wersja dla Compose)
+          # PORT HUNTER LOGIC
           # ====================================================
           START_PORT=9000
           END_PORT=9100
           SELECTED_PORT=0
 
-          # Próbujemy znaleźć port, jeśli ten projekt już działa
-          # Szukamy kontenera, który ma w nazwie nasz COMPOSE_PROJECT_NAME
-          # Zakładamy, że główny serwis nazywa się "app" (standard, o którym zaraz wspomnę)
-          CURRENT_CONTAINER_NAME="${{ env.COMPOSE_PROJECT_NAME }}-app-1"
+          # ZMIANA: Szukamy dokładnie po nazwie kontenera, którą wymuszamy w compose
+          CURRENT_CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
           
           EXISTING_PORT=$(docker inspect --format='{{(index (index .NetworkSettings.Ports "${{ env.INTERNAL_PORT }}/tcp") 0).HostPort}}' $CURRENT_CONTAINER_NAME 2>/dev/null || true)
 
@@ -84,11 +78,9 @@ jobs:
             echo "♻️ Znaleziono działającą instancję na porcie: $EXISTING_PORT"
             SELECTED_PORT=$EXISTING_PORT
           else
-            echo "🆕 Aplikacja nie działa lub to pierwszy deploy. Szukam wolnego portu ($START_PORT-$END_PORT)..."
+            echo "🆕 Szukam wolnego portu ($START_PORT-$END_PORT)..."
             USED_PORTS=$(docker ps --format='{{.Ports}}')
-            
             for ((port=$START_PORT; port<=$END_PORT; port++)); do
-              # Sprawdzamy czy port jest wolny (nie występuje w liście używanych)
               if [[ $USED_PORTS != *":$port->"* ]]; then
                 echo "✅ Port $port jest wolny."
                 SELECTED_PORT=$port
@@ -98,41 +90,32 @@ jobs:
           fi
 
           if [ "$SELECTED_PORT" -eq 0 ]; then
-             echo "❌ BŁĄD: Brak wolnych portów w zakresie $START_PORT-$END_PORT!"
+             echo "❌ BŁĄD: Brak wolnych portów!"
              exit 1
           fi
 
           # ====================================================
-          # URUCHOMIENIE (COMPOSE UP)
+          # URUCHOMIENIE
           # ====================================================
-          
           echo "🚀 Podnoszenie stacka (Port: $SELECTED_PORT)..."
 
-          # Eksportujemy zmienne, które zostaną wczytane przez docker-compose.yml
           export IMAGE_NAME=$FULL_IMAGE
           export HOST_PORT=$SELECTED_PORT
-
-          export CONTAINER_NAME="${{ github.event.repository.name }}"
+          # Eksportujemy poprawną nazwę dla docker-compose.yml
+          export CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
           
-          # Tutaj możesz dodać sekrety, jeśli AI je doda do repo:
-          # export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-
-          # Uruchamiamy z konkretną nazwą projektu (-p), żeby kontenery miały przewidywalne nazwy
+          # Podnosimy
           docker compose -p ${{ env.COMPOSE_PROJECT_NAME }} up -d --remove-orphans
 
-          # ====================================================
-          # HEALTHCHECK & CLEANUP
-          # ====================================================
           sleep 10
           
-          # Sprawdzamy czy kontener wstał
-          if [ "$(docker ps -q -f name=$CURRENT_CONTAINER_NAME)" ]; then
+          # ZMIANA: Sprawdzamy poprawną nazwę
+          if [ "$(docker ps -q -f name=^/${CURRENT_CONTAINER_NAME}$)" ]; then
             echo "🎉 Sukces! Aplikacja dostępna."
             echo "::notice title=Deployment Complete::App running at http://TWOJE_IP:$SELECTED_PORT"
-            
-            # Czyszczenie starych obrazów, żeby nie zapchać QNAPa
             docker image prune -f
           else
-            echo "🔥 BŁĄD: Kontener nie wstał po 10 sekundach. Sprawdź logi: docker logs $CURRENT_CONTAINER_NAME"
+            echo "🔥 BŁĄD: Kontener nie wstał. Logi:"
+            docker logs $CURRENT_CONTAINER_NAME
             exit 1
           fi
