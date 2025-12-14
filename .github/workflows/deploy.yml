@@ -1,121 +1,73 @@
-name: CI/CD QNAP (Compose + Port Hunter)
+name: Deploy to Portainer (Zero Touch - Private Repo)
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
-    inputs:
-      skip_build:
-        description: 'Pomiń budowanie (tylko redeploy)'
-        required: true
-        default: false
-        type: boolean
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-  # Nazwa kontenera tożsama z nazwą repo (dla czytelności w QNAP)
-  CONTAINER_NAME: ${{ github.event.repository.name }}
-  COMPOSE_PROJECT_NAME: ${{ github.event.repository.name }}
-  # ZMIANA: Chainlit działa na porcie 8000!
-  INTERNAL_PORT: 8000
 
 jobs:
-  build:
-    if: ${{ github.event_name == 'push' || inputs.skip_build == false }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Log in to Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Build and Push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-
   deploy:
-    if: always()
-    needs: build
-    runs-on: self-hosted
+    # Skoro wystawiasz Portainera na świat, możesz użyć ubuntu-latest
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Deploy with Compose
+      - name: Manage Portainer Stack
+        env:
+          # Adres Portainera (musi być dostępny z internetu!)
+          PORTAINER_URL: ${{ secrets.PORTAINER_HOST }}
+          API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          ENDPOINT_ID: ${{ secrets.PORTAINER_ENDPOINT_ID }} # Zazwyczaj '2' lub '1'
+          
+          # Dane do logowania, żeby Portainer mógł pobrać Twoje repo
+          GIT_USER: ${{ secrets.GIT_USERNAME }}
+          GIT_PASS: ${{ secrets.GIT_TOKEN }}
+          
+          # Automatyczne zmienne z GitHuba
+          STACK_NAME: ${{ github.event.repository.name }}
+          REPO_URL: ${{ github.event.repository.clone_url }}
+          BRANCH: "main"
+          COMPOSE_FILE: "docker-compose.yml"
         run: |
-          echo "🏁 Rozpoczynam deployment Docker Compose..."
-
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "🚀 Łączę się z Portainerem pod adresem: $PORTAINER_URL"
           
-          FULL_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          docker pull $FULL_IMAGE
+          # 1. Sprawdź czy stack już istnieje
+          STACK_ID=$(curl -s -k -H "X-API-Key: $API_KEY" \
+            "$PORTAINER_URL/api/stacks" | \
+            jq -r ".[] | select(.Name == \"$STACK_NAME\") | .Id")
 
-          # ====================================================
-          # PORT HUNTER LOGIC
-          # ====================================================
-          START_PORT=9000
-          END_PORT=9100
-          SELECTED_PORT=0
-
-          # ZMIANA: Szukamy dokładnie po nazwie kontenera, którą wymuszamy w compose
-          CURRENT_CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
-          
-          EXISTING_PORT=$(docker inspect --format='{{(index (index .NetworkSettings.Ports "${{ env.INTERNAL_PORT }}/tcp") 0).HostPort}}' $CURRENT_CONTAINER_NAME 2>/dev/null || true)
-
-          if [ ! -z "$EXISTING_PORT" ]; then
-            echo "♻️ Znaleziono działającą instancję na porcie: $EXISTING_PORT"
-            SELECTED_PORT=$EXISTING_PORT
+          if [ -z "$STACK_ID" ]; then
+            echo "🆕 Stack '$STACK_NAME' nie istnieje. Tworzę nowy..."
+            
+            # Tworzenie stacka z autoryzacją do prywatnego repo
+            curl -s -k -X POST \
+              -H "X-API-Key: $API_KEY" \
+              -H "Content-Type: application/json" \
+              "$PORTAINER_URL/api/stacks?method=repository&type=2&endpointId=$ENDPOINT_ID" \
+              -d "{
+                \"name\": \"$STACK_NAME\",
+                \"gitConfig\": {
+                  \"URL\": \"$REPO_URL\",
+                  \"ReferenceName\": \"refs/heads/$BRANCH\",
+                  \"ComposeFilePathInRepository\": \"$COMPOSE_FILE\",
+                  \"Authentication\": true,
+                  \"Username\": \"$GIT_USER\",
+                  \"Password\": \"$GIT_PASS\"
+                }
+              }"
+              
           else
-            echo "🆕 Szukam wolnego portu ($START_PORT-$END_PORT)..."
-            USED_PORTS=$(docker ps --format='{{.Ports}}')
-            for ((port=$START_PORT; port<=$END_PORT; port++)); do
-              if [[ $USED_PORTS != *":$port->"* ]]; then
-                echo "✅ Port $port jest wolny."
-                SELECTED_PORT=$port
-                break
-              fi
-            done
-          fi
-
-          if [ "$SELECTED_PORT" -eq 0 ]; then
-             echo "❌ BŁĄD: Brak wolnych portów!"
-             exit 1
-          fi
-
-          # ====================================================
-          # URUCHOMIENIE
-          # ====================================================
-          echo "🚀 Podnoszenie stacka (Port: $SELECTED_PORT)..."
-
-          export IMAGE_NAME=$FULL_IMAGE
-          export HOST_PORT=$SELECTED_PORT
-          # Eksportujemy poprawną nazwę dla docker-compose.yml
-          export CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
-          export OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"
-          # Podnosimy
-          docker compose -p ${{ env.COMPOSE_PROJECT_NAME }} up -d --remove-orphans
-
-          sleep 10
-          
-          # ZMIANA: Sprawdzamy poprawną nazwę
-          if [ "$(docker ps -q -f name=^/${CURRENT_CONTAINER_NAME}$)" ]; then
-            echo "🎉 Sukces! Aplikacja dostępna."
-            echo "::notice title=Deployment Complete::App running at http://TWOJE_IP:$SELECTED_PORT"
-            docker image prune -f
-          else
-            echo "🔥 BŁĄD: Kontener nie wstał. Logi:"
-            docker logs $CURRENT_CONTAINER_NAME
-            exit 1
+            echo "🔄 Stack '$STACK_NAME' istnieje (ID: $STACK_ID). Wymuszam aktualizację..."
+            
+            # Wymuszenie git pull i redeploy (zachowując dane logowania)
+            curl -s -k -X PUT \
+              -H "X-API-Key: $API_KEY" \
+              -H "Content-Type: application/json" \
+              "$PORTAINER_URL/api/stacks/$STACK_ID/git/redeploy?endpointId=$ENDPOINT_ID" \
+              -d "{
+                \"repositoryReferenceName\": \"refs/heads/$BRANCH\",
+                \"pullImage\": true,
+                \"prune\": true
+              }"
           fi
