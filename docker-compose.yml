@@ -4,7 +4,7 @@ services:
   app:
     # Obraz jest wstrzykiwany przez GitHub Actions
     image: ${IMAGE_NAME} 
-    container_name: ${{ github.event.repository.name }} # Opcjonalnie, dla czytelności w QNAP
+    container_name: ${CONTAINER_NAME} # Opcjonalnie, dla czytelności w QNAP
     restart: unless-stopped
     ports:
       # Port hosta jest wstrzykiwany przez Port Huntera
