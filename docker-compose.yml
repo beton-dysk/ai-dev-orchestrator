@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  app:
+    # Obraz jest wstrzykiwany przez GitHub Actions
+    image: ${IMAGE_NAME} 
+    container_name: ${{ github.event.repository.name }} # Opcjonalnie, dla czytelności w QNAP
+    restart: unless-stopped
+    ports:
+      # Port hosta jest wstrzykiwany przez Port Huntera
+      - "${HOST_PORT}:3000" 
+    environment:
+      - NODE_ENV=production

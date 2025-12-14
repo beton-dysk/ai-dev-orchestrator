@@ -1,20 +1,16 @@
-# Używamy lekkiego obrazu Node.js
-FROM node:18-alpine
+FROM python:3.11-slim
 
-# Ustawiamy folder roboczy w kontenerze
 WORKDIR /app
 
-# Kopiujemy pliki definicji zależności
-COPY package.json ./
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Instalujemy zależności
-RUN npm install
+# Instalacja Gita wewnątrz kontenera (niezbędne do pushowania)
+RUN apt-get update && apt-get install -y git && apt-get clean
 
-# Kopiujemy resztę kodu aplikacji
 COPY . .
 
-# Informujemy Dockera, że kontener używa portu 3000
-EXPOSE 3000
+# Chainlit domyślnie używa portu 8000
+EXPOSE 8000
 
-# Komenda startowa
-CMD ["npm", "start"]
+CMD ["chainlit", "run", "app.py", "-w", "--host", "0.0.0.0"]

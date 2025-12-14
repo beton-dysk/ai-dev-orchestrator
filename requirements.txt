@@ -1,0 +1,5 @@
+crewai
+langchain_openai
+chainlit
+python-dotenv
+duckduckgo-search # Do researchu w sieci
