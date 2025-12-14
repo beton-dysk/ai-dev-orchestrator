@@ -1,0 +1,141 @@
+name: CI/CD QNAP (Port Hunter + Secrets)
+
+on:
+  # 1. Automat przy każdym pushu (buduje i wdraża)
+  push:
+    branches: [ "main" ]
+  
+  # 2. Ręczny przycisk "Run workflow" (pozwala zmienić zmienne bez budowania)
+  workflow_dispatch:
+    inputs:
+      skip_build:
+        description: 'Pomiń budowanie (tylko aktualizacja ENV/Port)'
+        required: true
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CONTAINER_NAME: ${{ github.event.repository.name }}
+  # Port na którym aplikacja nasłuchuje W ŚRODKU kontenera (zazwyczaj 3000 dla Node, 80 dla Nginx)
+  INTERNAL_PORT: 3000
+
+jobs:
+  build:
+    # Buduj tylko jeśli to PUSH, albo jeśli NIE zaznaczono "skip_build"
+    if: ${{ github.event_name == 'push' || inputs.skip_build == false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Log in to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    # Uruchom zawsze (nawet jak build był pominięty)
+    if: always()
+    # Jeśli build był uruchomiony, czekaj na niego. Jeśli nie - startuj od razu.
+    needs: build
+    # Hack: 'always()' uruchamia też po błędzie builda, więc sprawdzamy status
+    # Jeśli build istniał i padł -> nie wdrażaj. Jeśli build był pominięty -> wdrażaj.
+    runs-on: [self-hosted, qnap]
+    steps:
+      - name: Deploy Process
+        run: |
+          echo "Rozpoczynam proces deploymentu..."
+          
+          # 1. Logowanie
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          
+          # 2. Pobranie obrazu (tylko jeśli nie pominęliśmy buildu, ale dla pewności pull nie zaszkodzi)
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          
+          # ====================================================
+          # PORT HUNTER LOGIC (9000-9100)
+          # ====================================================
+          START_PORT=9000
+          END_PORT=9100
+          SELECTED_PORT=0
+          
+          # Sprawdź stary port
+          EXISTING_PORT=$(docker inspect --format='{{(index (index .NetworkSettings.Ports "${{ env.INTERNAL_PORT }}/tcp") 0).HostPort}}' ${{ env.CONTAINER_NAME }} 2>/dev/null || true)
+          
+          if [ ! -z "$EXISTING_PORT" ]; then
+            echo "♻️ Zachowuję istniejący port: $EXISTING_PORT"
+            SELECTED_PORT=$EXISTING_PORT
+          else
+            echo "🆕 Szukam wolnego portu w zakresie $START_PORT-$END_PORT..."
+            USED_PORTS=$(docker ps --format='{{.Ports}}')
+            for ((port=$START_PORT; port<=$END_PORT; port++)); do
+              if [[ $USED_PORTS != *":$port->"* ]]; then
+                echo "✅ Znaleziono wolny port: $port"
+                SELECTED_PORT=$port
+                break
+              fi
+            done
+          fi
+          
+          if [ "$SELECTED_PORT" -eq 0 ]; then
+             echo "❌ Brak wolnych portów!"
+             exit 1
+          fi
+          
+          # ====================================================
+          # BACKUP & RUN
+          # ====================================================
+          
+          if [ "$(docker ps -aq -f name=^/${{ env.CONTAINER_NAME }}$)" ]; then
+            docker stop ${{ env.CONTAINER_NAME }} || true
+            docker rename ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}_backup
+          fi
+          
+          echo "🚀 Startuję kontener..."
+          
+          # --- SEKCJA ZMIENNYCH (SECRETS) ---
+          # Tutaj wstrzykujemy zmienne. 
+          # W szablonie zostawiamy przykłady zakomentowane lub generyczne.
+          
+          docker run -d \
+            --name ${{ env.CONTAINER_NAME }} \
+            --restart unless-stopped \
+            -p $SELECTED_PORT:${{ env.INTERNAL_PORT }} \
+            -v /share/Container/${{ env.CONTAINER_NAME }}:/app/data \
+            \
+            -e TZ=Europe/Warsaw \
+            -e DOCKER_CONTAINER_NAME=${{ env.CONTAINER_NAME }} \
+            \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            
+            # Aby dodać sekret w przyszłym projekcie, dopiszesz w tej sekcji:
+            # -e HASLO_DO_BAZY="${{ secrets.DB_PASSWORD }}" \
+
+          # ====================================================
+          # HEALTHCHECK
+          # ====================================================
+          sleep 10
+          if [ "$(docker ps -q -f name=^/${{ env.CONTAINER_NAME }}$)" ]; then
+            echo "✅ Sukces! Port: $SELECTED_PORT"
+            echo "::notice title=App Started::Link: http://IP-QNAPA:$SELECTED_PORT"
+            docker rm ${{ env.CONTAINER_NAME }}_backup || true
+            docker image prune -f
+          else
+            echo "🔥 BŁĄD! Rollback..."
+            docker rm -f ${{ env.CONTAINER_NAME }} || true
+            docker rename ${{ env.CONTAINER_NAME }}_backup ${{ env.CONTAINER_NAME }}
+            docker start ${{ env.CONTAINER_NAME }}
+            exit 1
+          fi
