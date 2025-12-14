@@ -111,6 +111,8 @@ jobs:
           # Eksportujemy zmienne, które zostaną wczytane przez docker-compose.yml
           export IMAGE_NAME=$FULL_IMAGE
           export HOST_PORT=$SELECTED_PORT
+
+          export CONTAINER_NAME="${{ github.event.repository.name }}"
           
           # Tutaj możesz dodać sekrety, jeśli AI je doda do repo:
           # export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
