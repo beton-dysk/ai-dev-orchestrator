@@ -48,7 +48,7 @@ jobs:
   deploy:
     if: always()
     needs: build
-    runs-on: [self-hosted, qnap]
+    runs-on: self-hosted
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
