@@ -68,7 +68,7 @@ async def main(message: cl.Message):
     crew = Crew(
         agents=[coder, devops],
         tasks=[task_code, task_docker],
-        verbose=2
+        verbose=True
     )
 
     # Uruchomienie (synchroniczne w tym przykładzie)
